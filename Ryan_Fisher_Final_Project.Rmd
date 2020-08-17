@@ -1,0 +1,492 @@
+---
+title: "Dimensionality Reduction and Ensemble Learning with MNIST"
+author: "Ryan Fisher"
+date: "September 8, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+set.seed(76559)
+
+## custom histogram function, which also add the Mean and Median of a plotted value
+## take not of BinDivider, need be careful of value that's chosen for it.
+HistFunc <- function(dataframe, plotVal, binDivider, lowCol, highCol, title) {
+  ggplot(data = dataframe, aes(plotVal, fill = ..count..)) +
+    geom_histogram(binwidth = sd(plotVal)/binDivider, color = "black", show.legend = TRUE) +
+    geom_vline(aes(xintercept=median(plotVal)), color="red1", linetype="dashed", size=1) +
+    geom_vline(aes(xintercept=mean(plotVal)), color="orange1", linetype="dashed", size=1) +
+    scale_fill_gradient(low = lowCol, high = highCol) +
+    ylab("Frequency") +
+    xlab(title)+
+    #scale_y_continuous(limits = c(0, 13)) + 
+    theme_grey()
+}
+
+## loading packages
+library(class)
+library(readr)
+library(randomForest)
+library(caret)
+library(gmodels)
+library(FNN)
+library(devtools)
+library(tidyverse)
+library(kernlab)
+library(reshape)
+library(cluster)
+library(ggfortify)
+library(e1071)
+library(Rtsne)
+library(kableExtra)
+
+## Load the training dataset
+setwd("C:/Users/ryanf/OneDrive/Documents/IST707/CViz")
+## set file names
+filename1="train.csv"
+#filename2="test.csv"
+## these are large files and can take a minute or so
+df <- read.csv(filename1, header = TRUE, na.strings = "NA")
+#test <- read.csv(filename2, header = TRUE, na.strings = "NA")
+## convert label to factor
+df$label <-as.factor(df$label)
+
+plot_samp <- df[sample(as.integer(row.names(df)),1000),]
+
+```
+
+# Introduction
+Computer Vision is a robust area of machine learning study, and has been since the 1960s.  The tasks thrown at computer vision are varied and nuanced in many ways.  For example, Optical Character Recognition (OCR) is not "new" technology, but quite sophisticated in how letters, words, numbers, and even signatures are identified. The task can sometimes be daunting; from digitizing hand written packing slips, to identifying cancerous tissue in medical imaging. 
+
+In fact, you've probably helped to train OCR many times without even realizing it, via reCAPTHA.  This is an online security measure where a user has to identify slightly misshapen text to prove they're not a robot.  The answers to those security prompts are fed into OCR training models, utilizing "human computation" to create training data for the digitization of written texts.
+
+Dimensionality Reduction is the analysis of features within a data set, and ranking those features based on the amount of variance in the data that each explains. In essence, the goal of dimensionality reduction is to remove features which are of relatively low predictive value, thus scoping down the input data and decreasing the computational resources required.  This can be a significant boost in processing performance for large data sets and advanced modeling techniques. 
+
+Lastly, Ensemble Learning is the _stacking_ of multiple machine learning models in sequence. This has the benefit of allowing the final model to view the data from multiple perspectives, and can help to bloster a model that may be weak at one type of task.  
+
+# About the data
+MNIST (Modified National Institute of Standards and Technology) is one of the most famous and deeply explored computer visions data sets available.  This data consists of 42,000 "images" of hand written numerical digits. In order to present these images as machine readable input, multiple transformation steps were taken (not by the author).
+
+* each "digit" is centered
+
+* images are converted to 8-bit, meaning each pixel value is between 0-255 grey-scale values
+
+* images are shrunken down to a resolution of 28 x 28
+
+* finally, each 28 x 28 8-bit image is converted into a vector with a length of 784, where each position in the vector represents a pixels 8-bit value
+
+The data set adds one more column ("label") designating the digit itself, for a total of 785 columns per record. There is not NAs within the data. Training data will consist of 30,000 records, with testing set comprising 12,000 records.  
+
+Below table represents a peek at how this appears as a data frame:
+
+```{r echo = FALSE}
+set.seed(76559)
+(df[1:5,1:10])
+```
+
+
+
+
+### Feature Selection
+As this is a classification task, the labels of each digit are converted from _int_ to _factor_ with 10 levels (0-9).
+
+Next, all pixel values will be normalized based on _log +1_ methodology as a pre-processing step. Note that _log +1_ must be used rather than just _log_ because the data set contains many values of _0_, and log(0) results in -infinity.  However, log(1) results in _0_, hence the reason for the _+1_.    
+
+```{r echo = FALSE}
+########################################
+############# Log Normalization ########
+########################################
+backup <-df
+dflog <- log(df[,-1]+1)
+dflog$label <- df$label
+dflog <- dflog[,c(785,1:784)]
+## checking that label is in position 1
+df <- dflog
+#df$label <- df$label
+rm(dflog)
+```
+
+### Visualizations
+
+```{r, echo = FALSE}
+########################################
+########## Number Panel #############
+## telling R that we're going to create a 10x10 tile matrix w/ 0.1 margins..
+## which will contain 100 little 28x28 images of the digits
+## this is visualize the 100 randomly sampled numbers in "data"
+set.seed(76559)
+data <- sample(as.integer(row.names(df)),100)
+
+## par sets viz parameters, mfrow sets the tiling of the 28x28 frames
+## mar sets the margins between each tile defined in "mfrow"
+par(mfrow=c(10,10),mar=c(0.1,0.1,0.1,0.1))
+
+## for loop to create tiles
+for (k in data) ##  for each row number (k) in the sample (data)
+{
+    row <- NULL ## row is going to be a place holder for the pixel value at [k,n]
+    # for each pixel value column (n) at each row of the sample (r)
+    for (n in 2:785)
+        ## hold that pixel value at each [k,n] a vector "row"
+        row[n-1] <- df[k,n] ## this for loop is bound to 784, so each vector will be that length
+        ####### !!!!!!!!!!!!!!!!!!!! #######
+        ## IF WE WANT TO SWITCH TO BINARY AS DESCRIBED EARLIER USE BELOW LINE
+        ##
+        #row[n-1] <- as.numeric(train[k,n] > 100)     # <<<-------
+        ##
+        ## prob worth experimenting w/ different threshold values, like > 100 or something     
+    ## use the above code to switch to binary, comment out the other line
+    # convert the vector "row" into a 28 x 28 matrix (matrix1)
+    matrix1 <- matrix(row,28,28,byrow=FALSE)
+    # create a matrix of all zeros, used for transposing
+    matrix2 <- matrix(rep(0,784),28,28)
+    
+    # setting i = to rows in each tile
+    for (i in 1:28)
+        # setting j = to columns in each tile
+        for (j in 1:28)
+            # transpose the value of matrix1 into matrix2 @ same coords
+            matrix2[i,28-j+1] <- matrix1[i,j]
+    ## can use to highlight specific sampled row nums if want
+    ## not being used right now hence the random value
+    if (k== 829874294702)
+        image(matrix2, axes=FALSE, col=heat.colors(2))
+    # everyone else gets this coloring
+    else
+        image(matrix2, axes=FALSE, col=grey.colors(256, start = 0, end = 1))
+}
+
+```
+
+Above provides a grey-scaled representation of what the digits looks like when "printed". There is noticeable deviation in how the digits are written.  Some 1's are at a slant, some 7's have cross-bars, some 4's have open tops like a "U", while others have a slant more like a triangle.  Just by viewing a sample of the digits, it's evident that there is likely to be class error when predicting. 
+
+Below shows the distribution of integer values within training data set
+```{r}
+HistFunc(df, as.integer(df$label), 10, "blue3", "deepskyblue1", "Digit Values 0 - 9")
+
+```
+
+Distribution of integer values is roughly uniform. 
+
+Below shows the distribution of pixel values within the data set.
+```{r}
+data.melt <- melt(plot_samp, id.vars = "label")
+## Pixel Value Distribution (redline = mean, orangeline = mean)
+HistFunc(data.melt, data.melt$value, 10, "blue3", "deepskyblue1", "Pixel Values (0-255)")
+
+```
+
+The majority of values in the data are of value _0_, meaning blank space.  This provides an opportunity to utilize Principal Component Analysis.  
+
+Below visualization takes a sample view to determine if values are separable, i.e. able to be classified.  Based on just this plot of a sample of 1000, it's obvious that there are clear clusters within the data set. 
+```{r}
+#t-Distributed Stochastic Neighoring is a modeling technique to map higher
+#dimensional data down to 2D for Visualization.  The main purpose of this exercise 
+#is to determine if the data can be classified, either linerally or non-linerally
+set.seed(76559)
+plot_samp$label <- as.factor(plot_samp$label)
+tsne <- Rtsne(as.matrix(plot_samp[,-1]), check_duplicates = FALSE, pca = TRUE, 
+    perplexity = 30, theta = 0.5, dims = 2)
+#plot(tsne$Y, col = plot_samp$label, main = "tSNE")
+## Example of how to do w/ GGPLOT
+tsne_plot <- data.frame(x = tsne$Y[,1], y = tsne$Y[,2], col = plot_samp$label)
+ggplot(tsne_plot) + geom_point(aes(x=x, y=y, color=col))
+
+```
+
+This charts utilizes tSNE to map higher dimensional data into 2D. This allows us to observe the clustering with the data, and gives confidence that this task can be completed utilizing classification algorithms.   
+
+Next, all values are normalized with _log +1_ methodology, prior to PCA. 
+
+###Principal Component Analysis
+
+The true goal of this analysis is to determine to what extent can the raw data be reduced without negatively effecting accuracy. One way of achieving this is via Principal Component Analysis, which will train on the whole data set, less labels, in order to determine which features explain the most variability.  The goal is to reduce the computational requirements by parring down the number of columns used for modeling. As currently stands, the data contains 784 columns, but the vast majority of values in those columns is _0_.  PRCOMP function will help determine which columns provide the most predictive value. 
+```{r echo = FALSE}
+########################################
+######### PCA Analysis #################
+########################################
+## Applying PCA 
+## trains PCA on the whole matrix, less the digit value
+## This take some time (about 3 minutes)
+set.seed(76559)
+pca.df <- prcomp(df[,-1], scale=FALSE, center = FALSE)
+## result is a ranking of PCAs based on how much of the variation they explain.
+## so PCA 1 explains the most, PCA 2 the second most, etc..
+#str(pca.df)
+## plot(pca.df)
+plot_samp <- df[sample(as.integer(row.names(df)),1000),]
+## Full plot, very busy
+#autoplot(pca.df, data = df, colour = "label")
+## Prob circles
+## this one shows a lot of overlap
+#autoplot(pam(plot_samp[-1],5), frame = TRUE, frame.type = 'norm')
+
+
+```
+
+```{r}
+##### This can only be done one time, then need to RM##########
+#rm(varEx)
+# Identify the amount of variance explained by the PCs
+varEx<-as.data.frame(pca.df$sdev^2/sum(pca.df$sdev^2))
+## creates a row for each PCA with the variance explained for the PCA
+## creates cumulative SUM of Variance Explained
+varEx<-cbind(c(1:784),cumsum(varEx[,1]))
+colnames(varEx)<-c("NmbrPCs","CumVar")
+## step-wise 50i cummulative variance explaied
+VarianceExplanation<-varEx[seq(0,700,50),]
+((VarianceExplanation))
+
+
+```
+
+
+```{r}
+plot(VarianceExplanation)
+```
+
+
+Based on the table above, PCA is highly effective at summarizing the data set.  Using just 100 columns, we can explain 95% of all variability in the data. For the purpose of this analysis, 100 PCAs will be used at the expense ~5% variance explanation.  This effectively reduces the data matrix from 33.3 million values to just 4.2 million, by dropping 684 columns across 42,000 records.  
+
+Contained within the PCA matrix are _rotational values_, which are essentially scalars that are applied to each value in a particular column.  The rotational values for the top 100 PCAs will be applied to the data in the 100 retained columns. For more inforation on the rotational values and ensuing martix multiplication, see code comments 
+
+```{r}
+########### PCA ROTATION VALUES ###############################
+## rotation values are the scalars for each pixel value
+#rm(rotate)
+## theres a matrix in there that's 784 x 784
+## that's the 784 pixel values, and 784 PCA, the intersection is the scalar for that pixel value
+pca.df$rotation[1:3,1:3]
+#dim(pca.df$rotation)
+## to change the number of PCAs used, switch the below
+rotval <- 100
+##PCA columns are in order of importance, so if want 100 express that here
+rotate<-pca.df$rotation[,1:rotval]
+#dim(rotate)
+## scale function rescales all values in train, then matrix multiplies by rotate
+## this works because train is 42000 x 784 and rotate is 784 x 100
+## this conforms to m x n times n x p rules
+## the multiplication is intractable for me, but it works 
+pca.df <- as.matrix(scale(df[,-1],center = FALSE, scale=FALSE))%*%(rotate)
+## train now only contains 100 columns, which are the PC scaled values
+pca.df <- as.data.frame(pca.df)
+## bringing back the label
+pca.df$label <- as.factor(df$label)
+## reordering
+pca.df <- pca.df[,c(rotval+1,1:rotval)]
+## checking that label is in position 1
+#colnames(pca.df[1])
+## confirm dimesions of new training data set
+#dim(pca.df)
+##### VIOLA !!! this is now 100 column, not 784
+
+```
+
+```{r include = FALSE}
+## splitting the datasets
+set.seed(76559)
+rows <- sample(1:42000,30000)
+pca.train <- pca.df[rows,]
+df.train <- df[rows,]
+pca.test <- pca.df[-rows,]
+df.test <- df[rows,]
+#bin.train <- binary.df[rows,]
+#bin.test <- binary.df[-rows,]
+
+```
+
+
+#Models
+Three models will be compared against each other, all utilizing the 100 PCA data set.  
+
+###kNN
+K-nearest neighbor is a quick and effective way to approach a classification tasks such as this.  Always the most difficult choice is which _n_ to choose.  Through multiple iterations of testing, _n = 5_ has shown to produce the best results, and will be used here. General rule is to use the square root of _n_, which in this case is 30,000.  However, 173 centers seems unreasonable and 5 has proven to work well. 
+
+
+```{r}
+## KNN w/ PCA
+set.seed(76559)
+kk <- FNN::knn(pca.train[,-1], test = pca.test[,-1], cl = pca.train$label, 
+    k = 5, algorithm = c("kd_tree"))
+## the output of kk is 10 factor levels, but it starts at 1, not zero.
+## have to use (-1) operator to reduce everything down one level to match
+kk.pred1 <- as.numeric(kk)-1
+kk.pred1 <- as.factor(kk.pred1)
+
+```
+
+###kSVM
+Support vector machine is also a common choice for classification tasks, and has been utilized with MNIST data very effectively.  However, SVM tends to be computationally expensive, especially when compared to KNN, but the hope is utilizing PCA will help to lighten the computational load.  Further, this SVM model uses the kernel of _rbfdot_, which while useful for this task, makes model interpretation slightly challenging.  
+```{r}
+## not so bad w/ the PCA list
+set.seed(76559)
+svmmodel <- ksvm(label ~ ., data = pca.train, type = "C-svc", kernel = "rbfdot", 
+    C = 100, gamma = 0.001, scaled = FALSE)
+predKSVM <- predict(svmmodel, pca.test)
+
+```
+
+###K-Means -> RF Ensemble
+Considering the size of the training data, additional techniques can be used to further shrink/summarize the data in order to lower the computational load.  One technique for this is ensemble learning with K-Means.  K-Means will look at each digit in the data set, and build 100 clusters, or examples, of what the digit looks like based on the top 100 PCAs.  This allows K-Means to see the whole training set, but then summarize and produce output which can then be used as the training set for the next algorithm in the stack. The flow of information will be PCA -> K-Means -> RandomForest as the ensemble stack.  This allows RandomForest to be deployed without the computationally restrictions usually encountered when running with a large dataset.  
+
+```{r include = FALSE}
+#################### PCA DIGIT Clustering ####################
+## set to null, will collect the K-Means centers for each digit
+set.seed(76559)
+cluster.train <- NULL
+clustercenters <- 100
+## K-means loop for each digit
+for (i in 0:9)
+{
+    ## create a df by looking at a single digit at a time 
+    digit <- pca.train[pca.train$label==i,-1]
+    set.seed(76559)
+    ## run k-means w/ 50 centers for each digit
+    ## K-means is looking at each pixel position and building 50 clusters (examples)
+    ## of how that digit would be clustered
+    cluster <- kmeans(x = digit,centers = clustercenters, iter.max = 20)
+    ## newdata collects the 50 centers for each digit in a two column vector
+    new_data <- cbind(rep(i,clustercenters),cluster$centers)
+    ## those two columns are appended w/ rbind to the dataframe
+    cluster.train<- rbind(cluster.train,new_data)
+}
+
+cluster.train <- as.data.frame(cluster.train)
+# Should be 500 x 101, which is 50 observations each of all 10 digits
+#dim(cluster.train)
+## chance column name back to "label"
+colnames(cluster.train)[colnames(cluster.train) == "V1"] <- "label"
+## label comes out as numeric, switch to factor
+cluster.train$label <- as.factor(cluster.train$label)
+
+```
+
+```{r include = FALSE}
+set.seed(76559)
+## rF w/ Clusters
+rf.cl <- randomForest(label ~., data = cluster.train)
+#rf.cl
+rf.cl.pred <- predict(rf.cl, newdata = pca.test)
+#confusionMatrix(rf.cl.pred, pca.test$label)
+
+```
+
+
+#Results
+
+###kNN
+```{r}
+## results of KNN w/ 5 clusters
+#str(kk)
+confusionMatrix(kk.pred1, pca.test$label)
+##this runs significantly faster than against Binary
+
+```
+
+kNN w/ PCAs performs very well and runs relatively quickly, achieving 97.12% accuracy. When viewed per digit:
+```{r}
+dt.tab <- table(kk.pred1, pca.test$label)
+dt.res <- NULL
+dt.tot <- 0
+for (i in 1:10)
+{
+    dt.tot <- dt.tot + dt.tab[i,i]
+    dt.res[i] <- dt.tab[i,i] / sum(dt.tab[,i])
+}
+dt.res <- data.frame(cbind(rep(0:9),dt.res))
+colnames(dt.res) <- (c("digit", "accuracy"))
+((dt.res))
+```
+
+There is class error where expected, mainly the more ambiguous digits such as 8's and 5's.  This technique is extremely accurate with 0's and 1's, which is also to be expected given those are the most unique digits, achieving >99%.   
+
+Overall, this is a very good result, and proves the power of combining PCA w/ KNN. By removing the lower predictive value features of the data set, kNN is able to more accurately predict digit classes.  PCA essentially removes noise at the expense of ~5% of variation explanation, but is still able to achieve 97% accuracy.  In terms of trad-offs this lends evidence to the usefulness of PCA and it's viability for this task. 
+
+###kSVM
+```{r}
+confusionMatrix(predKSVM, pca.test$label)
+
+```
+
+kSVM with PCA input achieves 98.12%, which is an incredibly good result.  SVM is computationally intensive though, so this model takes a number of minutes to run. Looking at class error:  
+
+```{r}
+dt.tab <- table(predKSVM, pca.test$label)
+dt.res <- NULL
+dt.tot <- 0
+for (i in 1:10)
+{
+    dt.tot <- dt.tot + dt.tab[i,i]
+    dt.res[i] <- dt.tab[i,i] / sum(dt.tab[,i])
+}
+dt.res <- data.frame(cbind(rep(0:9),dt.res))
+colnames(dt.res) <- (c("digit", "accuracy"))
+((dt.res))
+
+```
+
+kSVM class error is generally more balanced than kNN, with the lowest accuracy being 96.9%. This model  does a very good job of digit recognition, but the combination of PCA and kSVM makes it slow to run/process.  Similiar to kNN, this modeling technique combined with PCA is extremely accurate and the best result the author has been able to produce with the data set. 
+
+Interestingly, the model has 5,788 support vectors out of 30,000 which seems like a relatively narrow hyper-plane. Additionally, the model was trained with a high cost penalty of 100, resulting in zero training error.  Unfortunately, SVM is very hard to interpret other than on the basis of accuracy, which in this case is very good.  
+
+###Ensemble Learning
+```{r}
+#Results of randomforest Cluster Ensemble 
+confusionMatrix(rf.cl.pred, pca.test$label)
+
+```
+
+```{r include = FALSE}
+## These wont be show, but leaving them here as they are discussed
+### SVM w/ PCA (extremly poor results)
+set.seed(76559)
+model3 <- ksvm(label~., data = cluster.train, type = "C-svc", C=0.5)
+model3
+predKSVM2 <- predict(model3, pca.test)
+## around the neighborhood of 96% accuracy
+confusionMatrix(predKSVM2, pca.test$label)
+
+
+### KNN w/ Clusters
+knn.cluster <- FNN::knn(cluster.train[,-1], test = pca.test[,-1], cl = cluster.train$label, 
+    k = 5, algorithm = c("kd_tree"))
+#
+knn.cluster.pred <- as.numeric(knn.cluster)-1
+knn.cluster.pred <- as.factor(knn.cluster.pred)
+confusionMatrix(knn.cluster.pred, pca.test$label)
+## this is actually a pretty good result. 
+# 94% prediction accuracy based on only 1000 training reference points.
+
+
+```
+
+
+Results from the ensemble method are not as good as anticipated.  However, the accuracy of 90.4% isn't terrible all things considered.  Considering the data preparation steps that took place, +90% is actually quite impressive.  First, the data was paired down to 100 PCAs (feature reduction of 87%), leaving a training set of 30,000 records and 100 columns. Then K-Means looked at each digits PCAs and built 100 models of each digit, further reducing the training set to 1,000 records of 100 PCAs. This essentially means the training data was reduced by 99% through PCA and K-Means, and was still able to achieve more than 90% accuracy.  
+
+Additional models were trained utilizing K-Means ensemble, including kSVM and KNN, but they are omitted from this analysis for brevity.  However, accuracy with these two models were extremely opposing; ensemble kNN was 95% accurate, with ensemble SVM only achieving accuracy of 52%. SVM is an algorithm well suited to the MNIST task, so why it performs so poorly when ensembled with K-Means is quite interesting and not immediately apparent.   
+
+RandomForest was selected to report in detail because this modeling technique requires large amounts of computational resources and is generally unwieldy without some form of feature selection when applied to the whole training data set.  When RandomForest is utilized with this K-Means ensemble method though, the algorithm runs extremely quickly with relatively good results. Whether or not 91% is _good enough_ is a question of balance between computational power and the accuracy of the model.  Based on experience, 91% accuracy from RandomForest is not much lower than would be expected without PCA & K-Means clustering. 
+
+
+#Conclusions
+
+This analysis set out to determine the effectiveness of dimensionality reduction when applied to a well known computer vision case study.  The results of the Principal Component Analysis have been extremely encouraging, particularity when considering that 87% of the raw data was discarded (kNN & kSVM), but without a significant impact on accuracy.  
+
+Aside from PCA, additional dimensionality reduction methods were investigated but discarded, including a binary conversion scheme.  This approach first looked at the values for each pixel value, and rather than treat them on an 8-bit scale, they were simply converted to either 0 or 1, depending on if the original value was greater than 0.  While this looked promising, the resulting data frame was still the same size (784 columns).  So while the range of values was decreased from 256 to 2, there was no marked improvement with processing speed.  This is still an area for additional study though, as I feel there's an opportunity to further process the binary converted data, possibly with PCA or other more advanced approaches to feature selection. 
+
+Through previous iterations of modeling the MNIST data, it's quite common to see kNN, SVM, and RF models with accuracy around 92%-96%, based on parameter tuning. When compared to these previous methods, PCA actually offers an increase in accuracy and a massive decrease in computational resources. Principal Component Analysis is an extremely effective tool for shrinking a data set without compromising it's ability to accurately predict classes.  The results of this analysis have been highly encouraging with regard to PCA.
+
+For ensemble learning, there remains more investigatory work to be.  The results of the K-Means > RandomForest ensemble stack were slightly discouraging.  But as mentioned above, when we consider than only ~1% of the original data was used to train a RandomForest model with accuracy of +90%, the results don't seem so terrible. All and all, there's additional avenues of investigation to follow with ensemble learning, particularly the stacking order and algos utilized within the stack. Regardless, ensemble learning will remain a topic of follow-up analysis.  
+
+
+
+
+
+
+
+
+
+
+
+
+
